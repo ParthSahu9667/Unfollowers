@@ -4,10 +4,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.long
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -15,16 +12,33 @@ import javax.inject.Singleton
 /**
  * Parses Instagram's data export JSON files into [ParsedUser] lists.
  *
- * Instagram's export format has changed over time. This parser handles
- * multiple known structures via a defensive adapter approach so that
- * only this module needs updating when the format changes again.
+ * Two distinct real-world formats confirmed from an actual July 2026 export:
  *
- * Known formats:
- * 1. Current (2023+): Array of objects with "string_list_data" containing
- *    [{value, href, timestamp}]
- * 2. Older: Object with "relationships_following" / "relationships_followers"
- *    wrapping the same structure
- * 3. Very old: Simple array of {username, timestamp} objects
+ * FOLLOWERS (followers_1.json) — Root is a JsonArray:
+ * [
+ *   {
+ *     "title": "",
+ *     "media_list_data": [],
+ *     "string_list_data": [
+ *       { "href": "https://www.instagram.com/username", "value": "username", "timestamp": 123 }
+ *     ]
+ *   }, ...
+ * ]
+ * --> username comes from string_list_data[0].value
+ *
+ * FOLLOWING (following.json) — Root is a JsonObject with a key wrapper:
+ * {
+ *   "relationships_following": [
+ *     {
+ *       "title": "username",          <-- username is in the OUTER title, NOT in string_list_data
+ *       "string_list_data": [
+ *         { "href": "https://www.instagram.com/_u/username", "timestamp": 123 }
+ *         // NOTE: NO "value" field in this format!
+ *       ]
+ *     }, ...
+ *   ]
+ * }
+ * --> username comes from the outer object's "title" field
  */
 @Singleton
 class InstagramExportParser @Inject constructor() {
@@ -35,25 +49,12 @@ class InstagramExportParser @Inject constructor() {
         coerceInputValues = true
     }
 
-    /**
-     * Parse a followers JSON string. Handles numbered file splits
-     * by accepting a list of JSON content strings.
-     */
-    fun parseFollowers(vararg jsonContents: String): List<ParsedUser> {
-        return jsonContents.flatMap { content -> parseUserList(content) }
-    }
+    fun parseFollowers(vararg jsonContents: String): List<ParsedUser> =
+        jsonContents.flatMap { parseUserList(it) }
 
-    /**
-     * Parse a following JSON string.
-     */
-    fun parseFollowing(jsonContent: String): List<ParsedUser> {
-        return parseUserList(jsonContent)
-    }
+    fun parseFollowing(jsonContent: String): List<ParsedUser> =
+        parseUserList(jsonContent)
 
-    /**
-     * Core parsing logic — uses a robust recursive search to find user nodes.
-     * This makes it immune to wrapper/hierarchy changes by Instagram.
-     */
     private fun parseUserList(content: String): List<ParsedUser> {
         val trimmed = content.trim()
         if (trimmed.isEmpty()) return emptyList()
@@ -65,48 +66,60 @@ class InstagramExportParser @Inject constructor() {
         }
 
         val users = mutableListOf<ParsedUser>()
-        try {
-            extractUsersRecursively(element, users)
-        } catch (e: Exception) {
-            e.printStackTrace()
+
+        // Unwrap top-level object if needed (e.g. {"relationships_following": [...]})
+        val arrays: List<JsonArray> = when (element) {
+            is JsonArray -> listOf(element)
+            is JsonObject -> element.values.filterIsInstance<JsonArray>()
+            else -> emptyList()
         }
-        
-        // Remove duplicates just in case the JSON has duplicate entries
+
+        for (array in arrays) {
+            for (item in array) {
+                if (item !is JsonObject) continue
+                parseEntryObject(item)?.let { users.add(it) }
+            }
+        }
+
         return users.distinctBy { it.username }
     }
 
-    private fun extractUsersRecursively(element: JsonElement, users: MutableList<ParsedUser>) {
-        when (element) {
-            is JsonArray -> {
-                for (item in element) {
-                    extractUsersRecursively(item, users)
-                }
-            }
-            is JsonObject -> {
-                // Check if this object looks like a user node
-                val valueElement = element["value"]
-                val usernameElement = element["username"]
-                val hrefElement = element["href"]
-                val timestampElement = element["timestamp"]
+    /**
+     * Parses a single entry object which may be in one of two formats:
+     *
+     * Format A (followers_1.json):
+     *   { "title": "", "string_list_data": [{ "value": "username", "href": "...", "timestamp": 123 }] }
+     *   Username is in string_list_data[0].value
+     *
+     * Format B (following.json):
+     *   { "title": "username", "string_list_data": [{ "href": ".../_u/username", "timestamp": 123 }] }
+     *   Username is in the outer object's "title" field
+     */
+    private fun parseEntryObject(obj: JsonObject): ParsedUser? {
+        val stringListData = obj["string_list_data"] as? JsonArray ?: return null
+        val firstEntry = stringListData.firstOrNull() as? JsonObject ?: return null
 
-                val valueContent = if (valueElement is kotlinx.serialization.json.JsonPrimitive) valueElement.content else null
-                val usernameContent = if (usernameElement is kotlinx.serialization.json.JsonPrimitive) usernameElement.content else null
-                val href = if (hrefElement is kotlinx.serialization.json.JsonPrimitive) hrefElement.content else null
-                val timestamp = if (timestampElement is kotlinx.serialization.json.JsonPrimitive) timestampElement.longOrNull else null
+        val value = (firstEntry["value"] as? JsonPrimitive)?.content?.trim()
+        val href = (firstEntry["href"] as? JsonPrimitive)?.content
+        val timestamp = (firstEntry["timestamp"] as? JsonPrimitive)?.longOrNull
+        val title = (obj["title"] as? JsonPrimitive)?.content?.trim()
 
-                val username = valueContent ?: usernameContent
-
-                // It is considered a user node if it has a username AND (an instagram href OR a timestamp)
-                if (username != null && username.isNotBlank() && (href?.contains("instagram.com") == true || element.containsKey("timestamp"))) {
-                    users.add(ParsedUser(username, href, timestamp))
-                } else {
-                    // Not a user node, recurse into its values
-                    for (child in element.values) {
-                        extractUsersRecursively(child, users)
-                    }
-                }
-            }
-            else -> {}
+        // Username resolution:
+        // Format A has a non-empty "value" in string_list_data → use that
+        // Format B has no "value" at all → fall back to outer "title"
+        val username = when {
+            !value.isNullOrBlank() -> value
+            !title.isNullOrBlank() -> title
+            else -> return null
         }
+
+        // Normalize profile URL: following.json uses /instagram.com/_u/username
+        val cleanHref = href?.replace("instagram.com/_u/", "instagram.com/")
+
+        return ParsedUser(
+            username = username,
+            profileUrl = cleanHref,
+            timestamp = timestamp
+        )
     }
 }
