@@ -65,7 +65,11 @@ class InstagramExportParser @Inject constructor() {
         }
 
         val users = mutableListOf<ParsedUser>()
-        extractUsersRecursively(element, users)
+        try {
+            extractUsersRecursively(element, users)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
         
         // Remove duplicates just in case the JSON has duplicate entries
         return users.distinctBy { it.username }
@@ -80,10 +84,15 @@ class InstagramExportParser @Inject constructor() {
             }
             is JsonObject -> {
                 // Check if this object looks like a user node
-                val valueContent = element["value"]?.jsonPrimitive?.content
-                val usernameContent = element["username"]?.jsonPrimitive?.content
-                val href = element["href"]?.jsonPrimitive?.content
-                val timestamp = element["timestamp"]?.jsonPrimitive?.longOrNull
+                val valueElement = element["value"]
+                val usernameElement = element["username"]
+                val hrefElement = element["href"]
+                val timestampElement = element["timestamp"]
+
+                val valueContent = if (valueElement is kotlinx.serialization.json.JsonPrimitive) valueElement.content else null
+                val usernameContent = if (usernameElement is kotlinx.serialization.json.JsonPrimitive) usernameElement.content else null
+                val href = if (hrefElement is kotlinx.serialization.json.JsonPrimitive) hrefElement.content else null
+                val timestamp = if (timestampElement is kotlinx.serialization.json.JsonPrimitive) timestampElement.longOrNull else null
 
                 val username = valueContent ?: usernameContent
 

@@ -30,17 +30,14 @@ class ZipImportHandler @Inject constructor(
             ZipInputStream(inputStream).use { zip ->
                 var entry = zip.nextEntry
                 while (entry != null) {
-                    val name = entry.name.lowercase()
+                    val fileName = entry.name.substringAfterLast("/").lowercase()
 
                     when {
-                        // Match followers_1.json, followers_2.json, etc.
-                        name.contains("followers") && name.endsWith(".json") &&
-                                !name.contains("following") -> {
-                            followerJsons.add(readZipEntryContent(zip))
+                        fileName.startsWith("followers") && fileName.endsWith(".json") -> {
+                            followerJsons.add(zip.readBytes().toString(Charsets.UTF_8))
                         }
-                        // Match following.json
-                        name.contains("following") && name.endsWith(".json") -> {
-                            followingJson = readZipEntryContent(zip)
+                        fileName.startsWith("following") && fileName.endsWith(".json") -> {
+                            followingJson = zip.readBytes().toString(Charsets.UTF_8)
                         }
                     }
 
