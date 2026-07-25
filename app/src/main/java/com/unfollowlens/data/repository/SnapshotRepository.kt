@@ -9,6 +9,7 @@ import com.unfollowlens.data.db.entities.Snapshot
 import com.unfollowlens.data.parser.ZipImportHandler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -161,10 +162,8 @@ class SnapshotRepository @Inject constructor(
 
     /** Delete all data */
     suspend fun clearAllData() {
-        val snapshots = snapshotDao.getAllSnapshots()
+        val snapshots = snapshotDao.getAllSnapshots().first()
         // Cascade delete handles follower records
-        snapshots.collect { list ->
-            list.forEach { snapshotDao.delete(it) }
-        }
+        snapshots.forEach { snapshotDao.delete(it) }
     }
 }

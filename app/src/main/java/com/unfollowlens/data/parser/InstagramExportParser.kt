@@ -51,7 +51,8 @@ class InstagramExportParser @Inject constructor() {
     }
 
     /**
-     * Core parsing logic — tries multiple format strategies in order.
+     * Core parsing logic — uses a robust recursive search to find user nodes.
+     * This makes it immune to wrapper/hierarchy changes by Instagram.
      */
     private fun parseUserList(content: String): List<ParsedUser> {
         val trimmed = content.trim()
@@ -63,107 +64,40 @@ class InstagramExportParser @Inject constructor() {
             return emptyList()
         }
 
-        return tryParseCurrentFormat(element)
-            ?: tryParseLegacyWrappedFormat(element)
-            ?: tryParseSimpleFormat(element)
-            ?: emptyList()
+        val users = mutableListOf<ParsedUser>()
+        extractUsersRecursively(element, users)
+        
+        // Remove duplicates just in case the JSON has duplicate entries
+        return users.distinctBy { it.username }
     }
 
-    /**
-     * Format 1 (Current, 2023+):
-     * [
-     *   {
-     *     "title": "",
-     *     "media_list_data": [],
-     *     "string_list_data": [
-     *       { "href": "https://www.instagram.com/username", "value": "username", "timestamp": 1234567890 }
-     *     ]
-     *   },
-     *   ...
-     * ]
-     */
-    private fun tryParseCurrentFormat(element: JsonElement): List<ParsedUser>? {
-        if (element !is JsonArray) return null
-
-        val users = mutableListOf<ParsedUser>()
-        for (item in element) {
-            val obj = item as? JsonObject ?: continue
-            val stringListData = obj["string_list_data"] as? JsonArray ?: continue
-
-            for (entry in stringListData) {
-                val entryObj = entry as? JsonObject ?: continue
-                val user = extractUserFromEntry(entryObj)
-                if (user != null) users.add(user)
+    private fun extractUsersRecursively(element: JsonElement, users: MutableList<ParsedUser>) {
+        when (element) {
+            is JsonArray -> {
+                for (item in element) {
+                    extractUsersRecursively(item, users)
+                }
             }
+            is JsonObject -> {
+                // Check if this object looks like a user node
+                val valueContent = element["value"]?.jsonPrimitive?.content
+                val usernameContent = element["username"]?.jsonPrimitive?.content
+                val href = element["href"]?.jsonPrimitive?.content
+                val timestamp = element["timestamp"]?.jsonPrimitive?.longOrNull
+
+                val username = valueContent ?: usernameContent
+
+                // It is considered a user node if it has a username AND (an instagram href OR a timestamp)
+                if (username != null && username.isNotBlank() && (href?.contains("instagram.com") == true || element.containsKey("timestamp"))) {
+                    users.add(ParsedUser(username, href, timestamp))
+                } else {
+                    // Not a user node, recurse into its values
+                    for (child in element.values) {
+                        extractUsersRecursively(child, users)
+                    }
+                }
+            }
+            else -> {}
         }
-
-        return users.takeIf { it.isNotEmpty() }
-    }
-
-    /**
-     * Format 2 (Legacy wrapped):
-     * {
-     *   "relationships_following": [ ... same as format 1 ... ]
-     * }
-     * or
-     * {
-     *   "relationships_followers": [ ... ]
-     * }
-     */
-    private fun tryParseLegacyWrappedFormat(element: JsonElement): List<ParsedUser>? {
-        if (element !is JsonObject) return null
-
-        val possibleKeys = listOf(
-            "relationships_following",
-            "relationships_followers",
-            "followers",
-            "following"
-        )
-
-        for (key in possibleKeys) {
-            val array = element[key] as? JsonArray ?: continue
-            val result = tryParseCurrentFormat(array)
-            if (result != null) return result
-        }
-
-        return null
-    }
-
-    /**
-     * Format 3 (Very old / simple):
-     * [ { "username": "user1", "timestamp": 1234567890 }, ... ]
-     */
-    private fun tryParseSimpleFormat(element: JsonElement): List<ParsedUser>? {
-        if (element !is JsonArray) return null
-
-        val users = mutableListOf<ParsedUser>()
-        for (item in element) {
-            val obj = item as? JsonObject ?: continue
-            val username = obj["username"]?.jsonPrimitive?.content
-                ?: obj["value"]?.jsonPrimitive?.content
-                ?: continue
-
-            users.add(
-                ParsedUser(
-                    username = username,
-                    profileUrl = obj["href"]?.jsonPrimitive?.content,
-                    timestamp = obj["timestamp"]?.jsonPrimitive?.longOrNull
-                )
-            )
-        }
-
-        return users.takeIf { it.isNotEmpty() }
-    }
-
-    private fun extractUserFromEntry(entry: JsonObject): ParsedUser? {
-        val value = entry["value"]?.jsonPrimitive?.content ?: return null
-        val href = entry["href"]?.jsonPrimitive?.content
-        val timestamp = entry["timestamp"]?.jsonPrimitive?.longOrNull
-
-        return ParsedUser(
-            username = value,
-            profileUrl = href,
-            timestamp = timestamp
-        )
     }
 }

@@ -77,7 +77,7 @@ class ZipImportHandler @Inject constructor(
     }
 
     private fun readZipEntryContent(zip: ZipInputStream): String {
-        return BufferedReader(InputStreamReader(zip, Charsets.UTF_8)).readText()
+        return zip.readBytes().toString(Charsets.UTF_8)
     }
 
     private fun readUriContent(uri: Uri): String {
